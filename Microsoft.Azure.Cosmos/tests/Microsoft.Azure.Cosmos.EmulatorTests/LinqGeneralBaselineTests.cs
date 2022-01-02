@@ -18,6 +18,8 @@ namespace Microsoft.Azure.Cosmos.Services.Management.Tests.LinqProviderTests
     using BaselineTest;
     using Microsoft.Azure.Documents;
     using Microsoft.Azure.Cosmos.Scripts;
+    using System.Linq.Expressions;
+    using Microsoft.Azure.Cosmos.SqlObjects;
 
     [Microsoft.Azure.Cosmos.SDK.EmulatorTests.TestClass]
     public class LinqGeneralBaselineTests : BaselineTests<LinqTestInput, LinqTestOutput>
@@ -2148,6 +2150,36 @@ namespace Microsoft.Azure.Cosmos.Services.Management.Tests.LinqProviderTests
             Documents.Database database = await client.ReadDatabaseAsync(string.Format("dbs/{0}", testDb.Id));
 
             string databaseName = database.Id;
+
+            Expression<Func<Database, bool>> predicate = c => c.Id.ToLower().EndsWith("q");
+
+            //The SQL building engine expects a linq call chain.
+            //this part can be static because it is type independent.
+            var whereMethod = typeof(Queryable)
+                .GetMethods()
+                .Where(x => x.Name == "Where")
+                .Single(x => x.GetParameters()[1].ParameterType //Expression<Func<>>
+                    .GetGenericArguments()[0] //Func<>
+                    .GetGenericArguments().Count() == 2);
+                
+            Expression inputExpression = Expression.Call(
+                instance: null, //static
+                method: whereMethod.MakeGenericMethod(typeof(Database)),
+                arguments: new Expression[] {
+                    Expression.Parameter(typeof(IQueryable<Database>), "q"),
+                    predicate
+                });
+
+            // build the SQL object
+            var sqlQuery = ExpressionToSql.TranslateQuery(inputExpression, new Dictionary<object, string>(), new CosmosLinqSerializerOptions());
+
+            // With access to the internals, we would be able to manipuate the SqlQuery directly to something like
+            // "FROM {test.FromClause.Expression.Identifier} {test.WhereClause}" using an expression visitor. Because we are using
+            // reflection, it is simpler to rely on the fact that the whole query will take the form
+            // "SELECT VALUE [identifier] FROM [identifier] IN [collection] WHERE ..." (since we built the query, we know it has a constrained form.
+
+            var sqlSections = sqlQuery.ToString().Split(' ', count: 8);
+            var patchQueryString = $"FROM {sqlSections[2]} {sqlSections[7]}";
 
             List<Database> queryResults = new List<Database>();
             //Simple Equality
