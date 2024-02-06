@@ -10,22 +10,18 @@
 
     public class JsonPointerBuilder
     {
+        // supports finding delegates specified below.
+        static readonly Assembly sdkAssembly = typeof(CosmosClient).Assembly;
+        static readonly Type cosmosLinqSerializerType = sdkAssembly.GetType("Microsoft.Azure.Cosmos.Linq.DefaultCosmosLinqSerializer");
+        static readonly MethodInfo getMemberNameMethod = cosmosLinqSerializerType.GetMethod("SerializeMemberName");
+
         // optimized invocation of internal methods. See https://mattwarren.org/2016/12/14/Why-is-Reflection-slow/
         // Obviously, the delegates would be replaced by direct access if this was in the main SDK.
         static readonly Func<Expression, Expression> resolveConstantDelegate;
-        static readonly Func<MemberInfo, CosmosLinqSerializerOptions, string> getMemberNameDelegate;
+        readonly Func<MemberInfo, string> getMemberNameDelegate;
 
         static JsonPointerBuilder()
         {
-            Assembly sdkAssembly = typeof(CosmosClient).Assembly;
-
-            MethodInfo getMemberNameMethod = sdkAssembly
-                .GetType("Microsoft.Azure.Cosmos.Linq.TypeSystem")
-                .GetMethod("GetMemberName");
-            getMemberNameDelegate = (Func<MemberInfo, CosmosLinqSerializerOptions, string>)Delegate.CreateDelegate(
-                typeof(Func<MemberInfo, CosmosLinqSerializerOptions, string>),
-                getMemberNameMethod);
-
             MethodInfo resolveConstantMethod = sdkAssembly
                 .GetType("Microsoft.Azure.Cosmos.Linq.ConstantEvaluator")
                 .GetMethod("PartialEval", new[] {typeof(Expression) });
@@ -34,11 +30,13 @@
                 resolveConstantMethod);
         }
 
-        private readonly CosmosLinqSerializerOptions serializerOptions;
-
         internal JsonPointerBuilder(CosmosLinqSerializerOptions serializerOptions)
         {
-            this.serializerOptions = serializerOptions;
+            object defaultSerializerInstance = Activator.CreateInstance(cosmosLinqSerializerType, serializerOptions?.PropertyNamingPolicy ?? default);
+            this.getMemberNameDelegate = (Func<MemberInfo, string>)Delegate.CreateDelegate(
+                typeof(Func<MemberInfo, string>),
+                defaultSerializerInstance,
+                getMemberNameMethod);
         }
 
         public string Build(LambdaExpression expression)
@@ -83,7 +81,7 @@
                 }
 
                 // Member access: fetch serialized name and pop
-                pathPart = this.GetNameUnderContract(memberExpression.Member);
+                pathPart = this.getMemberNameDelegate(memberExpression.Member);
                 return memberExpression.Expression;
             }
 
@@ -118,11 +116,6 @@
             }
 
             throw new InvalidOperationException($"{currentExpression.GetType().Name} (at {currentExpression}) not supported");
-        }
-
-        private string GetNameUnderContract(MemberInfo member)
-        {
-            return getMemberNameDelegate(member, this.serializerOptions);
         }
 
         private static string GetIndex(Expression expression)
